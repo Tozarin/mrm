@@ -1,0 +1,5 @@
+(executable
+ (name main)
+ (public_name main)
+ (modules main point)
+ (libraries caqti caqti-driver-postgresql caqti.blocking))
