@@ -1,7 +1,7 @@
-module type Point2D = sig
-  val x : int
-  val y : int
-end
+(* module type Point2D = sig
+     val x : int
+     val y : int
+   end *)
 
 module type Point3D = sig
   val x : int
@@ -9,6 +9,7 @@ module type Point3D = sig
   val z : int
 end
 
+(*********************************************************)
 open Caqti_request.Infix
 open Caqti_type.Std
 open Result
@@ -18,49 +19,36 @@ let error err = Error err
 let ( >>= ) = bind
 let ( let* ) = bind
 let ( >>| ) x f = match x with Ok x -> f x |> return | Error err -> error err
+(*********************************************************)
 
 module Db = struct
-  type mode = [ `RO | `RW | `DR ]
+  type mode = [ `RO | `RW | `DROP ]
+  type 'db rows = Zero | One of 'db | Many of 'db list
 
-  module Uuid = struct
-    type 'db uuid = { uuid : int; m : 'db }
-
-    let uuid { uuid; m = _ } = uuid
-    let m { uuid = _; m } = m
-    let uuid_m uuid m = { uuid; m }
-  end
-
-  type ('db, 'mode, 'err) t =
-    | Point2D_Ok : ((module Point2D), 'mode, 'err) t
-    | Point2D_Err : 'err -> ((module Point2D), 'mode, 'err) t
-    | Point3D_Ok : ((module Point3D), 'mode, 'err) t
-    | Point3D_Err : 'err -> ((module Point3D), 'mode, 'err) t
+  let to_rows = function [] -> Zero | [ e ] -> One e | es -> Many es
+  let from_rows = function Zero -> [] | One e -> [ e ] | Many es -> es
 
   module Connection = struct
-    type 'db cache = Zero | Many of 'db Uuid.uuid list
-
-    let zero = Zero
-    let many us = Many us
-    let uncache = function Zero -> [] | Many es -> es
-
-    type ('db, 'mode, (*cache type*) 'err) conn = {
+    type ('db, 'mode) conn = {
       conn : (module Caqti_blocking.CONNECTION);
-      cache : 'db cache;
-      db : ('db, 'mode, 'err) t;
+      rows : 'db rows;
     }
 
-    let conn { conn; cache = _; db = _ } = conn
-    let cache { conn = _; cache; db = _ } = cache
-    let db { conn = _; cache = _; db } = db
-    let connection conn cache db = { conn; cache; db }
-
-    let ( >>> ) :
-        (('db, [< `RO | `RW ], 'err) conn as 'f_conn) ->
-        ('f_conn -> (('db, [> ], 'err) conn as 's_conn)) ->
-        's_conn =
-     fun conn f ->
-      match db conn with Point2D_Err _ | Point3D_Err _ -> conn | _ -> f conn
+    let conn { conn; rows = _ } = conn
+    let rows { conn = _; rows } = rows
+    let connection conn rows = { conn; rows }
   end
+end
+
+module type Uuid = sig
+  val uuid : int
+end
+
+module type Point2D = sig
+  include Uuid
+
+  val x : int
+  val y : int
 end
 
 module Point2DDb = struct
@@ -68,137 +56,140 @@ module Point2DDb = struct
   open Connection
 
   (* module mb *)
-  let create_point x y =
+  let _create_point uuid x y =
     (module struct
+      let uuid = uuid
       let x = x
       let y = y
     end : Point2D)
 
-  let point_x (module P : Point2D) = P.x
-  let point_y (module P : Point2D) = P.y
+  let new_point2d x y =
+    (module struct
+      let uuid = Random.bits () (* ???? *)
+      let x = x
+      let y = y
+    end : Point2D)
 
-  let same (module P1 : Point2D) (module P2 : Point2D) =
-    P1.x = P2.x && P1.y = P2.y
+  let point2d_uuid (module P : Point2D) = P.uuid
+  let point2d_x (module P : Point2D) = P.x
+  let point2d_y (module P : Point2D) = P.y
+
+  module type Point2D = sig
+    include Uuid
+
+    val x : int
+    val y : int
+  end
 
   let point =
-    let open Uuid in
-    product (fun uuid x y -> create_point x y |> uuid_m uuid)
-    @@ proj int (fun p -> p.uuid)
-    @@ proj int (fun p -> point_x p.m)
-    @@ proj int (fun p -> point_y p.m)
-    @@ proj_end
+    product _create_point @@ proj int point2d_uuid @@ proj int point2d_x
+    @@ proj int point2d_y @@ proj_end
 
   module Q = struct
     let init =
       (unit ->. unit)
-      @@ {eos|
-      CREATE TEMPORARY TABLE point2d (
-        point2d_id int NOT NULL,
-        x int NOT NULL,
-        y int NOT NULL,
-        PRIMARY KEY (point2d_id)
-        )
-    |eos}
+        {eos|
+        CREATE TEMPORARY TABLE point2d (
+          point2d_id int NOT NULL,
+          x int NOT NULL,
+          y int NOT NULL,
+          PRIMARY KEY (point2d_id)
+          )
+      |eos}
 
-    let drop = (unit ->. unit) @@ {|DROP TABLE point2d|}
+    let drop = (unit ->. unit) {|DROP TABLE point2d|}
 
     let add =
       (t3 int int int ->. unit)
         {|INSERT INTO point2d (point2d_id, x, y) VALUES (?, ?, ?)|}
 
     let delete =
-      (t2 int int ->. unit) {|DELETE FROM point2d WHERE x = ? AND y = ?|}
+      (* add filters *)
+      (int ->. unit) {|DELETE FROM point2d WHERE point2d_id = ?|}
 
-    let update_x =
-      (t2 int int ->. unit) {|UPDATE point2d SET x = ? WHERE point2d_id = ?|}
+    let select_all = (unit ->* point) {|SELECT * FROM point2d|}
 
-    let update_y =
-      (t2 int int ->. unit) {|UPDATE point2d SET y = ? WHERE point2d_id = ?|}
+    let update_by_uuid =
+      (t3 int int int ->. unit)
+        {|UPDATE point2d SET x = ?, y = ? WHERE point2d_id = ?|}
 
-    let update_several es =
-      let open Uuid in
+    let update_many es =
+      (* make one big q *)
       let q =
         List.fold_left
-          (fun q { uuid; m = (module P : Point2D) } ->
+          (fun q (module P : Point2D) ->
             Printf.sprintf
-              "%s\nUPDATE point2d SET x = %d, y = %d WHERE point2d_id = %d;" q
-              P.x P.y uuid)
+              "%s UPDATE point2d SET x = %d, y = %d WHERE point2d_id = %d;" q
+              P.x P.y P.uuid)
           "" es
       in
       (unit ->. unit) q
-
-    let select_all = (unit ->* point) {|SELECT * FROM point2d|}
   end
 
-  let _match_res { conn; cache; db = _ } = function
-    | Ok _ -> { conn; cache; db = Point2D_Ok }
-    | Error err -> { conn; cache; db = Point2D_Err err }
+  let _match_res conn = function
+    | Ok _ -> Ok conn
+    | Error err -> Error err (* error conver mb *)
 
   let connect :
       (module Caqti_blocking.CONNECTION) ->
-      ((module Point2D), [< `RW | `RO ], 'err) conn =
-   fun (module Conn) -> { conn = (module Conn); cache = Zero; db = Point2D_Ok }
+      ((module Point2D), [< `RW | `RO ]) conn =
+   fun (module Conn) -> { conn = (module Conn); rows = Zero }
 
   let init :
-      ((module Point2D), [ `RW ], 'err) conn ->
-      ((module Point2D), [ `RW ], 'err) conn =
-   fun ({ conn = (module Conn); cache = _; db = _ } as conn) ->
+      ((module Point2D), [< `RW | `DROP ]) conn ->
+      (((module Point2D), [ `RW ]) conn, 'err) Result.t =
+   fun ({ conn = (module Conn); rows = _ } as conn) ->
     Conn.exec Q.init () |> _match_res conn
 
   let drop :
-      ((module Point2D), [ `RW ], 'err) conn ->
-      ((module Point2D), [ `DR ], 'err) conn =
-   fun ({ conn = (module Conn); cache = _; db = _ } as conn) ->
+      ((module Point2D), [ `RW ]) conn ->
+      (((module Point2D), [ `DROP ]) conn, 'err) Result.t =
+   fun ({ conn = (module Conn); rows = _ } as conn) ->
     Conn.exec Q.drop () |> _match_res conn
 
   let add :
       (module Point2D) ->
-      ((module Point2D), [ `RW ], 'err) conn ->
-      ((module Point2D), [ `RW ], 'err) conn =
-   fun (module P) ({ conn = (module Conn); cache = _; db = _ } as conn) ->
-    Conn.exec Q.add (Random.bits () (*TODO*), P.x, P.y) |> _match_res conn
+      ((module Point2D), [ `RW ]) conn ->
+      (((module Point2D), [ `RW ]) conn, 'err) Result.t =
+   fun (module P) ({ conn = (module Conn); rows = _ } as conn) ->
+    Conn.exec Q.add (P.uuid, P.x, P.y) |> _match_res conn
 
   let delete :
+      (* adds filters to dels not by point*)
       (module Point2D) ->
-      ((module Point2D), [ `RW ], 'err) conn ->
-      ((module Point2D), [ `RW ], 'err) conn =
-   fun (module P) ({ conn = (module Conn); cache = _; db = _ } as conn) ->
-    Conn.exec Q.delete (P.x, P.y) |> _match_res conn
+      ((module Point2D), [ `RW ]) conn ->
+      (((module Point2D), [ `RW ]) conn, 'err) Result.t =
+   fun (module P) ({ conn = (module Conn); rows = _ } as conn) ->
+    Conn.exec Q.delete P.uuid |> _match_res conn
 
   let select_all :
-      ((module Point2D), ([< `RW | `RO ] as 'mode), 'err) conn ->
-      (module Point2D) Db.Uuid.uuid list * ((module Point2D), 'mode, 'err) conn
-      =
-   fun { conn = (module Conn); cache; db } ->
+      ((module Point2D), ([< `RW | `RO ] as 'mode)) conn ->
+      (((module Point2D), 'mode) conn, 'err) Result.t =
+   fun { conn = (module Conn); rows = _ } ->
     Conn.collect_list Q.select_all () |> function
-    | Ok es ->
-        let cache = uncache cache in
-        let cache =
-          match
-            List.filter (fun e -> not @@ List.mem e cache) es
-            |> List.append cache
-          with
-          | [] -> Zero
-          | es -> Many es
-        in
-        (es, Connection.connection (module Conn) cache db)
-    | Error err -> ([], connection (module Conn) cache (Point2D_Err err))
+    | Ok es -> Ok { conn = (module Conn); rows = to_rows es }
+    | Error err -> Error err
 
   let commit :
-      (module Point2D) Uuid.uuid list ->
-      (((module Point2D), [ `RW ], 'err) conn as 'conn) ->
-      'conn =
-   fun es { conn = (module Conn); cache; db } ->
-    let open Db.Uuid in
-    let cache = uncache cache in
-    let to_commit =
+      (module Point2D) list ->
+      ((module Point2D), [ `RW ]) conn ->
+      (((module Point2D), [< `RW | `RO ]) conn, 'err) Result.t =
+   fun es ({ conn = (module Conn); rows } as conn) ->
+    let old_rows = from_rows rows in
+    let diff =
       List.filter
-        (fun { uuid; m } ->
-          List.exists (fun { uuid = id; m = e } -> uuid = id && same m e) cache
-          |> not)
+        (fun (module NewP : Point2D) ->
+          List.exists
+            (fun (module OldP : Point2D) ->
+              NewP.uuid = OldP.uuid && (NewP.x <> OldP.x || NewP.y <> OldP.y))
+            old_rows)
         es
     in
-    Conn.exec (Q.update_several to_commit) () |> function
-    | Ok _ -> connection (module Conn) Zero db
-    | Error err -> connection (module Conn) Zero (Point2D_Err err)
+    List.fold_left
+      (fun conn (module P : Point2D) ->
+        conn
+        >>= fun ({ conn = (module Conn : Caqti_blocking.CONNECTION); rows = _ }
+                 as conn) ->
+        Conn.exec Q.update_by_uuid (P.x, P.y, P.uuid) |> _match_res conn)
+      (return conn) diff
 end

@@ -20,32 +20,34 @@ let () =
   | Error msg -> Caqti_error.pp Format.std_formatter msg
   | Ok conn -> (
       let open Point.Point2DDb in
-      let open Point.Db.Uuid in
-      let pp_point { uuid; m = (module P : Point.Point2D) } =
-        Printf.printf "id: %d\tx: %d\t y: %d\n" uuid P.x P.y
+      let pp_point (module P : Point.Point2D) =
+        Printf.printf "id: %d\tx: %d\t y: %d\n" P.uuid P.x P.y
       in
+      let ( >>= ) = Result.bind in
       let q =
         connect conn |> init
-        |> add (create_point 1 1)
-        |> add (create_point 1 2)
-        |> add (create_point 2 1)
-        |> add (create_point 1 1)
-        |> delete (create_point 2 1)
-        |> select_all
-        |> fun (ps, conn) ->
-        List.iter pp_point ps;
-        conn
-        |> commit
-             (List.mapi
-                (fun i { uuid; m = _ } -> { uuid; m = create_point i i })
-                ps)
-        |> select_all
-        |> fun (ps, conn) ->
-        List.iter pp_point ps;
-        conn |> drop
+        >>= add (new_point2d 1 1)
+        >>= add (new_point2d 1 2)
+        >>= add (new_point2d 2 1)
+        >>= add (new_point2d 1 1)
+        >>= delete (new_point2d 2 1)
+        >>= select_all
+        >>= fun c ->
+        List.iter pp_point (Point.Db.from_rows c.rows);
+        print_endline "";
+        Ok c >>= select_all >>= fun c ->
+        Point.Db.Connection.rows c |> Point.Db.from_rows
+        |> List.map (fun (module P : Point.Point2D) ->
+               (module struct
+                 let uuid = P.uuid
+                 let x = 100
+                 let y = 100
+               end : Point.Point2D))
+        |> fun es ->
+        commit es c >>= select_all >>= fun c ->
+        List.iter pp_point (Point.Db.from_rows c.rows);
+        Ok c >>= drop
       in
-      let open Point.Db in
-      match q.db with
-      | Point2D_Ok | Point3D_Ok -> ()
-      | Point2D_Err err | Point3D_Err err ->
-          Caqti_error.pp Format.std_formatter err)
+      match q with
+      | Ok _ -> ()
+      | Error err -> Caqti_error.pp Format.std_formatter err)
