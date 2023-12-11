@@ -1,2 +1,4 @@
 (library
- (name mrm))
+ (name mrm)
+ (kind ppx_deriver)
+ (libraries ppxlib caqti caqti-driver-postgresql caqti.blocking))
