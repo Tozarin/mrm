@@ -2,4 +2,12 @@
  (name main)
  (public_name main)
  (modules main point)
- (libraries caqti caqti-driver-postgresql caqti.blocking))
+ (flags -w -32)
+ (libraries
+  caqti
+  caqti-driver-postgresql
+  caqti-driver-sqlite3
+  caqti.blocking
+  mrm)
+ (preprocess
+  (pps mrm)))

@@ -17,13 +17,16 @@ let is_include_check (signature : signature) =
     ~f:(fun acc ssig -> acc || sig_check ssig)
     ~init:false signature
 
+let common_types = [ "int"; "float"; "string"; "bool" ]
+
 let get_types (ssig : signature) =
   let match_type = function
     | Ptyp_constr (id, []) ->
         let id = Longident.flatten_exn id.txt |> String.concat "." in
-        if List.mem id ~set:[ "int"; "float"; "string"; "char"; "bool" ] then
-          Some id
-        else None
+        if List.mem id ~set:common_types then Some id else None
+    | Ptyp_package (id, []) ->
+        let id = Longident.flatten_exn id.txt |> String.concat "." in
+        Some id
     | _ -> None
   in
   let get_type ({ psig_desc; psig_loc = _ } : signature_item) =
@@ -42,7 +45,19 @@ let get_types (ssig : signature) =
   in
   List.map ~f:get_type ssig |> List.filter_map ~f:(fun e -> e)
 
-let type_convert = function "string" -> "VARCHAR(256)" | t -> t
+let uuid_types : (string * string) list -> (string * string) list =
+  List.filter ~f:(fun (_, t) -> List.mem t ~set:common_types |> not)
+
+let convert_uuid : (string * string) list -> (string * string) list =
+  List.map ~f:(fun (name, t) ->
+      if List.mem t ~set:common_types |> not then (name, "int") else (name, t))
+
+let type_convert = function
+  | "int" -> "INT"
+  | "float" -> "REAL"
+  | "bool" -> "BOOLEAN"
+  | "string" -> "VARCHAR(256)"
+  | _ -> "INT" (* uuid to other tables *)
 
 let impl =
   List.map ~f:(fun code -> Lexing.from_string code |> Parse.implementation)
@@ -51,34 +66,46 @@ let interface =
   List.map ~f:(fun code -> Lexing.from_string code |> Parse.interface)
 
 module Codegen_q = struct
-  let codegen_q_sig modname types loc =
+  let codegen_q_sig _ types loc =
     let name = { txt = Some "Q"; loc } in
+    let types = convert_uuid types in
     let ts = List.map ~f:snd types in
     let open Printf in
     let init_sig_code =
       {| val init : (unit, unit, [ `Zero ]) Caqti_request.t |}
     in
+
     let drop_sig_code =
       {| val drop : (unit, unit, [ `Zero ]) Caqti_request.t |}
     in
+
     let add_sig_code =
       sprintf {| val add : (%s, unit, [ `Zero ]) Caqti_request.t |}
         (ts |> String.concat "* ")
     in
+
     let delete_sig_code =
       {| val delete : (int, unit, [ `Zero ]) Caqti_request.t |}
     in
+
+    let select_by_uuid_sig_code =
+      sprintf {| val select_by_uuid : (int, (%s)), [ `One ]) Caqti_request.t|}
+        (ts |> String.concat " * ")
+    in
+
     let select_all_sig_code =
       sprintf
         {|
-          val select_all : (unit, (module %s), [ `Many | `One | `Zero ]) Caqti_request.t
+          val select_all : (unit, (%s), [ `Many | `One | `Zero ]) Caqti_request.t
         |}
-        modname
+        (ts |> String.concat " * ")
     in
+
     let update_by_uuid_sig_code =
       sprintf {| val update_by_uuid : (%s, unit, [ `Zero]) Caqti_request.t |}
         (String.concat "* " (List.tl ts @ [ List.hd ts ]))
     in
+
     let modsig =
       Pmty_signature
         (interface
@@ -87,6 +114,7 @@ module Codegen_q = struct
              drop_sig_code;
              add_sig_code;
              delete_sig_code;
+             select_by_uuid_sig_code;
              select_all_sig_code;
              update_by_uuid_sig_code;
            ]
@@ -101,6 +129,8 @@ module Codegen_q = struct
   let codegen_q_str modname types loc =
     let name = { txt = Some "Q"; loc } in
     let lowname = String.lowercase_ascii modname in
+    let uuid_types = uuid_types types in
+    let types = convert_uuid types in
     let names = List.map ~f:fst types in
     let ts = List.map ~f:snd types in
     let open Printf in
@@ -109,9 +139,10 @@ module Codegen_q = struct
         {|let init = 
             let open Caqti_type.Std in 
             let open Caqti_request.Infix in 
-            (unit ->. unit) "CREATE TEMPORARY TABLE %s (
+            (unit ->. unit) 
+            "CREATE TABLE %s (
               %s
-              PRIMARY KEY (%s)
+              %s
             )"
         |}
         lowname
@@ -120,17 +151,25 @@ module Codegen_q = struct
              sprintf "%s %s NOT NULL,\n" name (type_convert t))
            types
         |> String.concat "")
-        (List.hd types |> fst)
+        ("PRIMARY KEY (uuid)"
+         :: List.map
+              ~f:(fun (name, t) ->
+                sprintf "FOREIGN KEY (%s) REFERENCES %s(uuid)" name
+                  (String.lowercase_ascii t))
+              uuid_types
+        |> String.concat ",\n")
     in
+
     let drop_str_code =
       sprintf
         {|let drop =
             let open Caqti_type.Std in 
             let open Caqti_request.Infix in 
             (unit ->. unit) "DROP TABLE %s" 
-          |}
+        |}
         lowname
     in
+
     let add_str_code =
       sprintf
         {|let add = 
@@ -138,23 +177,36 @@ module Codegen_q = struct
             let open Caqti_request.Infix in 
             (t%d %s ->. unit) 
             "INSERT INTO %s (%s) VALUES (%s)"
-          |}
+        |}
         (List.length types)
         (ts |> String.concat " ")
         lowname
         (names |> String.concat ", ")
         (List.map ~f:(fun _ -> "?") types |> String.concat ", ")
     in
+
     let delete_str_code =
       sprintf
         {|let delete = 
             let open Caqti_type.Std in 
             let open Caqti_request.Infix in 
             (int ->. unit)
-            "DELETE FROM %s WHERE %s_uuid = ?"
+            "DELETE FROM %s WHERE uuid = ?"
+        |}
+        lowname
+    in
+
+    let select_by_uuid_str_code =
+      sprintf
+        {|let select_by_uuid = 
+            let open Caqti_type.Std in 
+            let open Caqti_request.Infix in 
+            (int ->! %s)
+            "SELECT * FROM %s WHERE uuid = ?"
         |}
         lowname lowname
     in
+
     let select_all_str_code =
       sprintf
         {|let select_all = 
@@ -165,6 +217,7 @@ module Codegen_q = struct
         |}
         lowname lowname
     in
+
     let update_by_uuid_str_code =
       sprintf
         {|let update_by_uuid = 
@@ -188,6 +241,7 @@ module Codegen_q = struct
              drop_str_code;
              add_str_code;
              delete_str_code;
+             select_by_uuid_str_code;
              select_all_str_code;
              update_by_uuid_str_code;
            ]
@@ -203,97 +257,169 @@ end
 let codegen_db_sig_by_sig modname types loc =
   let name = { txt = Some (String.cat modname "_Db"); loc } in
   let open Printf in
+  let uuid_types = uuid_types types in
+  let types = convert_uuid types in
   let ts = List.map ~f:snd types in
   let lowname = String.lowercase_ascii modname in
+
+  (* type ('mainmods, 'submods1, 'submods2, ...) conns = ((module ModName, 'mainmods) conn * 'submods1 SubModule1.conns * 'submods2 SubModule2.conns * ...) *)
+  let conns_type_sig_code =
+    let bodycode =
+      sprintf "((module %s), '%smodes) Mrm.Db.Connection.conn" modname lowname
+      :: List.map
+           ~f:(fun (name, t) ->
+             sprintf "'%smodes %s_Db.conns" (String.lowercase_ascii name) t)
+           uuid_types
+      |> String.concat " * "
+    in
+    let phantomcode =
+      sprintf "'%smodes" lowname
+      :: List.map
+           ~f:(fun (name, _) ->
+             String.lowercase_ascii name |> sprintf "'%smodes")
+           uuid_types
+      |> String.concat ", "
+    in
+    sprintf "type (%s) conns = (%s)" phantomcode bodycode
+  in
+
+  let conns_with_mod_sig_code mods =
+    mods :: List.map ~f:(fun (_, t) -> sprintf "'%smodes" t) uuid_types
+    |> String.concat ", " |> sprintf "(%s) conns"
+  in
+
+  let conns_with_single_mod_sig_code mods =
+    mods :: List.map ~f:(fun _ -> mods) uuid_types
+    |> String.concat ", " |> sprintf "(%s) conns"
+  in
+
+  (* nths element of tuple *)
   let accessors_sig_code =
     List.map
       ~f:(fun (name, typ) ->
-        Printf.sprintf "val %s_%s : (module %s) -> %s" lowname name modname typ)
+        Printf.sprintf "val %s_%s : (%s) -> %s" lowname name
+          (ts |> String.concat " * ")
+          typ)
       types
     |> String.concat "\n"
   in
+
+  (* tuple creation *)
   let create_ojb_sig_code =
-    sprintf "val _create_%s : %s -> (module %s)" lowname
+    sprintf "val _create_%s : %s -> (%s)" lowname
       (ts |> String.concat " ->")
-      modname
+      (ts |> String.concat " * ")
   in
-  let new_obj_sig_code =
-    sprintf "val new_%s : %s -> (module %s)" lowname
-      (List.tl types |> List.map ~f:snd |> String.concat " ->")
-      modname
-  in
+
   let connect_sig_code =
     sprintf
-      {|val connect : 
-          (module Caqti_blocking.CONNECTION) ->
-          ((module %s), [< `RW | `RO ]) Mrm.Db.Connection.conn
+      {|val connect :
+          %s -> %s
       |}
-      modname
+      ("(module Caqti_blocking.CONNECTION)"
+       :: List.map
+            ~f:(fun (_, t) -> sprintf "('%smodes %s.conns)" t t)
+            uuid_types
+      |> String.concat " ->")
+      (conns_with_mod_sig_code "[< `RW | `RO ]")
   in
+
   let init_sig_code =
     sprintf
-      {|val init : 
-          ((module %s), [< `RW | `DROP ]) Mrm.Db.Connection.conn ->
-          (((module %s), [ `RW] ) Mrm.Db.Connection.conn, 'err) Result.t
+      {|var init :
+          %s -> (%s, 'err) Result.t
       |}
-      modname modname
+      (conns_with_mod_sig_code "[< `RW | `DROP ]")
+      (conns_with_mod_sig_code "[ `RW ]")
   in
+
   let drop_sig_code =
     sprintf
-      {|val drop : 
-          ((module %s), [ `RW ]) Mrm.Db.Connection.conn ->
-          (((module %s), [ `DROP ]) Mrm.Db.Connection.conn, 'err) Result.t
+      {|val drop :
+          %s -> (%s, 'err) Result.t
       |}
-      modname modname
+      (conns_with_mod_sig_code "[ `RW ]")
+      (conns_with_mod_sig_code "[ `DROP ]")
   in
+
+  let add_deep_sig_code =
+    sprintf
+      {|val add_deep :
+        (module %s) -> %s -> (%s, 'err) Result.t
+      |}
+      modname
+      (conns_with_single_mod_sig_code "[ `RW ]")
+      (conns_with_single_mod_sig_code "[ `RW ]")
+  in
+
   let add_sig_code =
     sprintf
-      {|val add : 
-          (module %s) ->
-          ((module %s), [ `RW ]) Mrm.Db.Connection.conn ->
-          (((module %s), [ `RW ]) Mrm.Db.Connection.conn, 'err) Result.t
+      {|val add :
+        (module %s) -> %s -> (%s, 'err) Result.t
       |}
-      modname modname modname
+      modname
+      (conns_with_single_mod_sig_code "[ `RW ]")
+      (conns_with_single_mod_sig_code "[ `RW ]")
   in
+
   let delete_sig_code =
     sprintf
       {|val delete :
-          (module %s) ->
-          ((module %s), [ `RW ]) Mrm.Db.Connection.conn ->
-          (((module %s), [ `RW ]) Mrm.Db.Connection.conn, 'err) Result.t
+        (module %s) -> %s -> (%s, 'err) Result.t
       |}
-      modname modname modname
+      modname
+      (conns_with_single_mod_sig_code "[ `RW ]")
+      (conns_with_single_mod_sig_code "[ `RW ]")
   in
+
+  let select_by_uuid_sig_code =
+    sprintf
+      {|val select_by_uuid :
+          int ->
+          %s -> ((module %s) * %s, 'err) Result.t
+      |}
+      (conns_with_single_mod_sig_code "[< `RW | `RO ]")
+      modname
+      (conns_with_single_mod_sig_code "[< `RW | `RO ]")
+  in
+
   let select_all_sig_code =
     sprintf
-      {|val code : 
-          ((module %s), ([< `RW | `RO ] as 'mode)) Mrm.Db.Connection.conn ->
-          ((module %s) list * ((module %s), 'mode) Mrm.Db.Connection.conn, 'err) Result.t
+      {|val select_all :
+          %s -> ((module %s) list * %s, 'err) Result.t
       |}
-      modname modname modname
+      (conns_with_single_mod_sig_code "[< `RW | `RO ]")
+      modname
+      (conns_with_single_mod_sig_code "[< `RW | `RO ]")
   in
-  let commit_sig_code =
-    sprintf
-      {|val commit : 
-          (module %s) list ->
-          ((module %s), [ `RW ]) Mrm.Db.Connection.conn ->
-          (((module %s), [< `RW | `RO ]) Mrm.Db.Connection.conn, 'err) Result.t
-      |}
-      modname modname modname
-  in
+
+  (* let commit_sig_code =
+       sprintf
+         {|val commit :
+             (module %s) list ->
+             %s ->
+             (%s, 'err) Result.t
+         |}
+         modname
+         (conns_with_single_mod_sig_code "[ `RW ]")
+         (conns_with_single_mod_sig_code "[< `RW | `RO ]")
+     in *)
   let modsig =
     Pmty_signature
-      (interface [ accessors_sig_code; create_ojb_sig_code; new_obj_sig_code ]
+      (interface
+         [ conns_type_sig_code; accessors_sig_code; create_ojb_sig_code ]
        @ [ Codegen_q.codegen_q_sig modname types loc ]
        @ interface
            [
              connect_sig_code;
              init_sig_code;
              drop_sig_code;
+             add_deep_sig_code;
              add_sig_code;
              delete_sig_code;
+             select_by_uuid_sig_code;
              select_all_sig_code;
-             commit_sig_code;
+             (*              commit_sig_code; *)
            ]
       |> List.flatten)
   in
@@ -307,33 +433,69 @@ let codegen_db_str_by_sig modname types loc =
   let name = { txt = Some (String.cat modname "_Db"); loc } in
   let open Printf in
   let names = List.map ~f:fst types in
+  let uuid_types = uuid_types types in
+  let types = convert_uuid types in
+  let normal_types =
+    List.filter
+      ~f:(fun (name, _) ->
+        List.mem name ~set:(List.map ~f:fst uuid_types) |> not)
+      types
+  in
   let lowname = String.lowercase_ascii modname in
+
+  let conns_type_str_code =
+    let bodycode =
+      sprintf "((module %s), '%smodes) Mrm.Db.Connection.conn" modname lowname
+      :: List.map
+           ~f:(fun (name, t) ->
+             sprintf "'%smodes %s_Db.conns" (String.lowercase_ascii name) t)
+           uuid_types
+      |> String.concat " * "
+    in
+    let phantomcode =
+      sprintf "'%smodes" lowname
+      :: List.map
+           ~f:(fun (name, _) ->
+             String.lowercase_ascii name |> sprintf "'%smodes")
+           uuid_types
+      |> String.concat ", "
+    in
+    let code = sprintf "type (%s) conns = (%s)" phantomcode bodycode in
+    code
+  in
+
+  let conns_with_mod_sig_code mods =
+    mods :: List.map ~f:(fun (_, t) -> sprintf "'%smodes" t) uuid_types
+    |> String.concat ", " |> sprintf "(%s) conns"
+  in
+
+  let conns_with_single_mod_sig_code mods =
+    mods :: List.map ~f:(fun _ -> mods) uuid_types
+    |> String.concat ", " |> sprintf "(%s) conns"
+  in
+
+  let match_conns_code =
+    sprintf
+      {|let { Mrm.Db.Connection.conn = (module Conn : Caqti_blocking.CONNECTION); Mrm.Db.Connection.rows = _ } = %s in|}
+      (if List.length uuid_types = 0 then "con" else "fst con")
+  in
+
   let accessors_str_code =
     List.map
       ~f:(fun (name, _) ->
-        sprintf "let %s_%s (module M : %s) = M.%s" lowname name modname name)
+        sprintf "let %s_%s (%s) = %s" lowname name
+          (names |> String.concat ", ")
+          name)
       types
     |> String.concat "\n"
   in
+
   let create_ojb_str_code =
-    sprintf "let _create_%s %s = (module struct %s end : %s)" lowname
+    sprintf "let _create_%s %s = (%s)" lowname
       (names |> String.concat " ")
-      (List.map
-         ~f:(fun (name, _) -> Printf.sprintf "let %s = %s" name name)
-         types
-      |> String.concat "\n")
-      modname
+      (names |> String.concat ", ")
   in
-  let new_obj_str_code =
-    sprintf
-      "let new_%s %s = (module struct let uuid = Random.bits () %s end : %s)"
-      (String.lowercase_ascii modname)
-      (List.tl types |> List.map ~f:fst |> String.concat " ")
-      (List.tl types
-      |> List.map ~f:(fun (name, _) -> Printf.sprintf "let %s = %s" name name)
-      |> String.concat "\n")
-      modname
-  in
+
   let obj_str_code =
     sprintf
       {|let %s = Caqti_type.Std.product _create_%s %s @@ Caqti_type.Std.proj_end|}
@@ -345,105 +507,256 @@ let codegen_db_str_by_sig modname types loc =
          types
       |> String.concat " ")
   in
+
   let match_res_str_code =
-    {|let _match_res conn = function
-        | Ok _ -> Ok conn
+    {|let _match_res con = function
+        | Ok _ -> Ok con
         | Error err -> Error err
     |}
   in
+
   let connect_str_code =
+    let sigg =
+      sprintf "%s -> %s"
+        ("(module Caqti_blocking.CONNECTION)"
+         :: List.map
+              ~f:(fun (_, t) -> sprintf "('%smodes %s_Db.conns)" t t)
+              uuid_types
+        |> String.concat " ->")
+        (conns_with_mod_sig_code "[< `RW | `RO ]")
+    in
     sprintf
-      {|let connect :
-          (module Caqti_blocking.CONNECTION) ->
-          ((module %s), [< `RW | `RO ]) Mrm.Db.Connection.conn = 
-         fun (module Conn) -> Random.self_init(); { conn = (module Conn); rows = Mrm.Db.Zero}
+      {|let connect : %s =
+         fun (module Conn : Caqti_blocking.CONNECTION) %s -> Random.self_init(); (%s)
       |}
-      modname
-  in
-  let init_str_code =
-    sprintf
-      {|let init :
-          ((module %s), [< `RW | `DROP ]) Mrm.Db.Connection.conn ->
-          (((module %s), [ `RW ]) Mrm.Db.Connection.conn, 'err) Result.t = 
-         fun ({ conn = (module Conn); rows = _ } as conn) ->
-          Conn.exec Q.init () |> _match_res conn
-      |}
-      modname modname
-  in
-  let drop_str_code =
-    sprintf
-      {|let drop : 
-          ((module %s), [ `RW ]) Mrm.Db.Connection.conn ->
-          (((module %s), [ `DROP ]) Mrm.Db.Connection.conn, 'err) Result.t = 
-         fun ({ conn = (module Conn); rows = _ } as conn) -> 
-          Conn.exec Q.drop () |> _match_res conn
-      |}
-      modname modname
-  in
-  let add_str_code =
-    sprintf
-      {|let add:
-          (module %s) ->
-          ((module %s), [ `RW ]) Mrm.Db.Connection.conn ->
-          (((module %s), [ `RW ]) Mrm.Db.Connection.conn, 'err) Result.t =
-         fun (module M) ({ conn = (module Conn); rows = _ } as conn) ->
-          Conn.exec Q.add (%s) |> _match_res conn
-      |}
-      modname modname modname
-      (List.map ~f:(fun (name, _) -> String.cat "M." name) types
+      sigg
+      (List.map ~f:fst uuid_types |> String.concat " ")
+      ({|{ Mrm.Db.Connection.conn = (module Conn); Mrm.Db.Connection.rows = Mrm.Db.Zero }|}
+       :: List.map ~f:fst uuid_types
       |> String.concat ", ")
   in
-  let delete_str_code =
+
+  let init_str_code =
+    let sigg =
+      sprintf "%s -> (%s, 'err) Result.t"
+        (conns_with_mod_sig_code "[< `RW | `DROP ]")
+        (conns_with_mod_sig_code "[ `RW ]")
+    in
     sprintf
-      {|let delete :
-          (module %s) ->
-          ((module %s), [ `RW ]) Mrm.Db.Connection.conn ->
-          (((module %s), [ `RW ]) Mrm.Db.Connection.conn, 'err) Result.t =
-         fun (module M) ({ conn = (module Conn); rows = _ } as conn) ->
-          Conn.exec Q.delete M.uuid |> _match_res conn
+      {|let init : %s =
+         fun con ->
+          %s
+          Conn.exec Q.init () |> _match_res con
       |}
-      modname modname modname
+      sigg match_conns_code
   in
-  let select_all_str_code =
+
+  let drop_str_code =
+    let sigg =
+      sprintf "%s -> (%s, 'err) Result.t"
+        (conns_with_mod_sig_code "[ `RW ]")
+        (conns_with_mod_sig_code "[ `DROP ]")
+    in
     sprintf
-      {|let select_all:
-          ((module %s), ([< `RW | `RO ] as 'mode)) Mrm.Db.Connection.conn ->
-          ((module %s) list * ((module %s), 'mode) Mrm.Db.Connection.conn, 'err) Result.t = 
-         fun { conn = (module Conn); rows = _ } ->
+      {|let drop : %s =
+         fun con -> 
+          let (%s) = con in
+          Conn.exec Q.drop () |> _match_res (%s)
+      |}
+      sigg
+      ({|{ Mrm.Db.Connection.conn = (module Conn : Caqti_blocking.CONNECTION); Mrm.Db.Connection.rows = rows}|}
+       :: List.map ~f:(fun (name, _) -> String.cat name "_con") uuid_types
+      |> String.concat ", ")
+      ({|{Mrm.Db.Connection.conn = (module Conn); Mrm.Db.Connection.rows = rows}|}
+       :: List.map ~f:(fun (name, _) -> String.cat name "_con") uuid_types
+      |> String.concat ", ")
+  in
+
+  let add_deep_str_code =
+    let sigg =
+      sprintf "(module %s) -> %s -> (%s, 'err) Result.t" modname
+        (conns_with_single_mod_sig_code "[ `RW ]")
+        (conns_with_single_mod_sig_code "[ `RW ]")
+    in
+    sprintf
+      {|let add_deep : %s =
+         fun (module M : %s) con ->
+          let open Mrm.Db.Connection in
+          let (%s) = con in
+          %s
+          %s
+          Conn.exec Q.add (%s) |> _match_res (%s)
+      |}
+      sigg modname
+      ({|{ conn = (module Conn); rows }|}
+       :: List.map ~f:(fun (name, _) -> sprintf "%s_conn" name) uuid_types
+      |> String.concat ", ")
+      (List.map
+         ~f:(fun (name, t) ->
+           sprintf
+             {|let (module SubM) = M.%s in 
+                let* %s_conn = %s_Db.add (module SubM) %s_conn in 
+                let %s = SubM.uuid in|}
+             name name t name name)
+         uuid_types
+      |> String.concat "\n")
+      (List.map
+         ~f:(fun (name, _) -> sprintf "let %s = M.%s in" name name)
+         normal_types
+      |> String.concat "\n")
+      (names |> String.concat ", ")
+      ("{ conn = (module Conn); rows }"
+       :: List.map ~f:(fun (name, _) -> sprintf "%s_conn" name) uuid_types
+      |> String.concat ", ")
+  in
+
+  let add_str_code =
+    let sigg =
+      sprintf "(module %s) -> %s -> (%s, 'err) Result.t" modname
+        (conns_with_single_mod_sig_code "[ `RW ]")
+        (conns_with_single_mod_sig_code "[ `RW ]")
+    in
+    sprintf
+      {|let add : %s = 
+         fun (module M : %s) con ->
+          %s
+          %s
+          %s
+          Conn.exec Q.add (%s) |> _match_res con
+      |}
+      sigg modname match_conns_code
+      (List.map
+         ~f:(fun (name, _) ->
+           sprintf "let (module SubM) = M.%s in let %s = SubM.uuid in" name name)
+         uuid_types
+      |> String.concat "\n")
+      (List.map
+         ~f:(fun (name, _) -> sprintf "let %s = M.%s in" name name)
+         normal_types
+      |> String.concat "\n")
+      (names |> String.concat ", ")
+  in
+
+  let delete_str_code =
+    let sigg =
+      sprintf "(module %s) -> %s -> (%s, 'err) Result.t" modname
+        (conns_with_single_mod_sig_code "[ `RW ]")
+        (conns_with_single_mod_sig_code "[ `RW ]")
+    in
+    sprintf
+      {|let delete : %s =
+         fun (module M : %s) con ->
+          %s
+          Conn.exec Q.delete M.uuid |> _match_res con
+      |}
+      sigg modname match_conns_code
+  in
+
+  let select_by_uuid_str_code =
+    let sigg =
+      sprintf "int -> %s -> ((module %s) * %s, 'err) Result.t"
+        (conns_with_single_mod_sig_code "[< `RW | `RO ]")
+        modname
+        (conns_with_single_mod_sig_code "[< `RW | `RO ]")
+    in
+    sprintf
+      {|let select_by_uuid : %s =
+         fun uuid con ->
+          let open Mrm.Db.Connection in
+          let (%s) = con in
+          Conn.find Q.select_by_uuid uuid |> function
+          | Error err -> Error err
+          | Ok (%s) -> 
+            let open Mrm.Db.Connection in 
+            %s
+            let m = (module struct %s end : %s) in
+            Ok (m, con)
+      |}
+      sigg
+      ("{ conn = (module Conn); rows = _ }"
+       :: List.map ~f:(fun (name, _) -> sprintf "%s_conn" name) uuid_types
+      |> String.concat ", ")
+      (names |> String.concat ", ")
+      (List.map
+         ~f:(fun (name, t) ->
+           sprintf "let* %s, %s_conn = %s_Db.select_by_uuid %s %s_conn in" name
+             name t name name)
+         uuid_types
+      |> String.concat "\n")
+      (List.map ~f:(fun name -> sprintf "let %s = %s" name name) names
+      |> String.concat "\n")
+      modname
+  in
+
+  let select_all_str_code =
+    let sigg =
+      sprintf "%s -> ((module %s) list * %s, 'err) Result.t"
+        (conns_with_single_mod_sig_code "[< `RW | `RO ]")
+        modname
+        (conns_with_single_mod_sig_code "[< `RW | `RO ]")
+    in
+    sprintf
+      {|let select_all : %s =
+         fun con ->
+          let open Mrm.Db.Connection in
+          let (%s) = con in
           Conn.collect_list Q.select_all () |> function
-          | Ok es -> let open Mrm.Db.Connection in Ok (es, { conn = (module Conn); rows = Mrm.Db.to_rows es })
+          | Ok es -> 
+            let open Mrm.Db.Connection in
+            let* es = List.fold_right
+              (fun (%s) acc -> 
+                let* acc = acc in
+                %s 
+                (module struct %s end : %s) :: acc |> return) 
+              es (return [])
+            in
+            Ok (es, (%s))
           | Error err -> Error err
       |}
-      modname modname modname
+      sigg
+      ("{ conn = (module Conn); rows = _ }"
+       :: List.map ~f:(fun (name, _) -> sprintf "%s_conn" name) uuid_types
+      |> String.concat ", ")
+      (names |> String.concat ", ")
+      (List.map
+         ~f:(fun (name, t) ->
+           sprintf "let* %s, %s_conn = %s_Db.select_by_uuid %s %s_conn in" name
+             name t name name)
+         uuid_types
+      |> String.concat "\n")
+      (List.map ~f:(fun name -> sprintf "let %s = %s" name name) names
+      |> String.concat "\n")
+      modname
+      ("{ conn = (module Conn); rows = Mrm.Db.to_rows es}"
+       :: List.map ~f:(fun (name, _) -> sprintf "%s_conn" name) uuid_types
+      |> String.concat ", ")
   in
-  let commit_str_code =
-    sprintf
-      {|let commit : 
-          (module %s) list ->
-          ((module %s), [ `RW ]) Mrm.Db.Connection.conn ->
-          (((module %s), [< `RW | `RO ]) Mrm.Db.Connection.conn, 'err) Result.t =
-         fun es ({ conn = (module Conn); rows } as conn) ->
-            List.fold_left
-            (fun con (module M : %s) ->
-              let open Mrm.Db.Connection in
-              let (>>=) = Result.bind in
-              con
-              >>= fun ({ conn = (module Conn : Caqti_blocking.CONNECTION); rows = _ }
-                       as conn) ->
-              Conn.exec Q.update_by_uuid (%s) |> _match_res conn)
-            (Mrm.return conn) es
-      |}
-      modname modname modname modname
-      ( List.map ~f:(fun (name, _) -> String.cat "M." name) types |> fun l ->
-        Printf.sprintf "%s, %s" (List.tl l |> String.concat ", ") (List.hd l) )
-  in
+
+  (* let commit_str_code =
+       sprintf
+         {|let commit =
+            fun es ({ conn = (module Conn); rows } as conn) ->
+               List.fold_left
+               (fun con (module M : %s) ->
+                 let open Mrm.Db.Connection in
+                 let (>>=) = Result.bind in
+                 con
+                 >>= fun ({ conn = (module Conn : Caqti_blocking.CONNECTION); rows = _ }
+                          as conn) ->
+                 Conn.exec Q.update_by_uuid (%s) |> _match_res conn)
+               (Mrm.return conn) es
+         |}
+         modname
+         ( List.map ~f:(fun (name, _) -> String.cat "M." name) types |> fun l ->
+           Printf.sprintf "%s, %s" (List.tl l |> String.concat ", ") (List.hd l) )
+     in *)
   let modstr =
     Pmod_structure
       (impl
          [
+           conns_type_str_code;
            accessors_str_code;
            create_ojb_str_code;
-           new_obj_str_code;
            obj_str_code;
          ]
        @ [ Codegen_q.codegen_q_str modname types loc ]
@@ -453,10 +766,12 @@ let codegen_db_str_by_sig modname types loc =
              connect_str_code;
              init_str_code;
              drop_str_code;
+             add_deep_str_code;
              add_str_code;
              delete_str_code;
+             select_by_uuid_str_code;
              select_all_str_code;
-             commit_str_code;
+             (*              commit_str_code; *)
            ]
       |> List.flatten)
   in
@@ -476,9 +791,12 @@ let codegen_db codegen_f extension_f
   | Some { pmty_desc = Pmty_signature ssig; pmty_loc; pmty_attributes = _ } ->
       if is_include_check ssig then
         let types = get_types ssig in
-        if List.length types = 0 then
+        if
+          List.length types = 0
+          || List.length types != List.length ssig - 1 (* Uuid include *)
+        then
           ext pmty_loc
-            {|Cannot derive database access module for first-class module without primitive types to store|}
+            {|Cannot derive database access module for first-class module with not primitive types to store|}
         else codegen_f pmtd_name.txt (("uuid", "int") :: types) pmty_loc
       else
         ext pmty_loc

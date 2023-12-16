@@ -1,25 +1,69 @@
+open Caqti_request.Infix
+open Caqti_type.Std
+open Result
+open Mrm
+
 module type Foo = sig
   include Mrm.Uuid
 
-  val x : int
-  val z : string
+  val foo : string
 end
 [@@deriving mrm]
 
+module type Bar = sig
+  include Mrm.Uuid
+
+  val some : int
+  val foo : (module Foo)
+end
+[@@deriving mrm]
+
+module type Point2D = sig
+  include Mrm.Uuid
+
+  val x : int
+  val y : int
+  val some_module : (module Bar)
+end
+[@@deriving mrm]
+
+let foo =
+  (module struct
+    let uuid = 1
+    let foo = "123"
+  end : Foo)
+
+let bar =
+  (module struct
+    let uuid = 42
+    let some = 42
+    let foo = foo
+  end : Bar)
+
+let point =
+  (module struct
+    let uuid = 1
+    let x = 1
+    let y = 2
+    let some_module = bar
+  end : Point2D)
+
 let () =
-  match Mrm.connect () with
-  | Error msg -> Mrm.pp_error msg
+  match connect_sqlite ~database:"testing" with
+  | Error err -> pp_error err
   | Ok conn -> (
-      let open Foo_Db in
-      let pp (module F : Foo) = Printf.printf "%d: %d %s\n" F.uuid F.x F.z in
-      let ( >>= ) = Result.bind in
-      let q =
-        connect conn |> init
-        >>= add (new_foo 1 "1")
-        >>= add (new_foo 2 "2")
-        >>= select_all
-        >>= fun (fs, c) ->
-        List.iter pp fs;
-        drop c
+      let foo_conn =
+        Foo_Db.connect conn |> Foo_Db.init |> function
+        | Ok conn -> conn
+        | _ -> failwith "foo"
       in
-      match q with Ok _ -> () | Error err -> Mrm.pp_error err)
+      let bar_conn =
+        Bar_Db.connect conn foo_conn |> Bar_Db.init |> function
+        | Ok conn -> conn
+        | _ -> failwith "bar"
+      in
+      let point_conn =
+        Point2D_Db.connect conn bar_conn
+        |> Point2D_Db.init >>= Point2D_Db.add_deep point
+      in
+      match point_conn with Ok _ -> () | Error err -> pp_error err)

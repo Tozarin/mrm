@@ -29,21 +29,11 @@ module type Uuid = sig
   val uuid : int
 end
 
-let get_uri () =
-  let env_vars =
-    let ( let* ) = Option.bind in
-    let* pg_host = Sys.getenv_opt "PGHOST" in
-    let* pg_port = Sys.getenv_opt "PGPORT" in
-    let* pg_database = Sys.getenv_opt "PGDATABASE" in
-    Some (pg_host, pg_port, pg_database)
-  in
-  match env_vars with
-  | Some (pg_host, pg_port, pg_database) ->
-      Printf.sprintf "postgresql://%s:%s/%s" pg_host pg_port pg_database
-  | None -> "postgresql://"
+let connect_postgres ~host ~port ~database =
+  Printf.sprintf "postgresql://%s:%s/%s" host port database
+  |> Uri.of_string |> Caqti_blocking.connect
 
-let connect () =
-  let uri = get_uri () in
-  Caqti_blocking.connect (Uri.of_string uri)
+let connect_sqlite ~database =
+  String.cat "sqlite3://:" database |> Uri.of_string |> Caqti_blocking.connect
 
 let pp_error : Caqti_error.t -> unit = Caqti_error.pp Format.std_formatter
