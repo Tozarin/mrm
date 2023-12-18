@@ -186,11 +186,12 @@ module Codegen_q = struct
         {|let add = 
             let open Caqti_type.Std in 
             let open Caqti_request.Infix in 
-            (t%d %s ->. unit) 
+            (%s ->. unit) 
             "INSERT INTO %s (%s) VALUES (%s)"
         |}
-        (List.length types)
-        (ts |> String.concat " ")
+        (List.fold_right ~f:(sprintf "(t2 %s %s)")
+           (List.filteri ~f:(fun i _ -> i != List.length ts - 1) ts)
+           ~init:(List.length ts - 1 |> List.nth ts))
         lowname
         (names |> String.concat ", ")
         (List.map ~f:(fun _ -> "?") types |> String.concat ", ")
@@ -234,11 +235,11 @@ module Codegen_q = struct
         {|let update_by_uuid = 
             let open Caqti_type.Std in 
             let open Caqti_request.Infix in 
-            (t%d %s ->. unit)
+            (%s ->. unit)
             "UPDATE %s SET %s WHERE uuid = ?"
         |}
-        (List.length types)
-        (String.concat " " (List.tl ts @ [ List.hd ts ]))
+        (List.fold_right ~f:(sprintf "(t2 %s %s)") (List.tl ts)
+           ~init:(List.hd ts))
         lowname
         (List.tl types
         |> List.map ~f:(fun (name, _) -> sprintf "%s = ?" name)
@@ -648,7 +649,9 @@ let codegen_db_str_by_sig modname types loc =
          ~f:(fun (name, _) -> sprintf "let %s = M.%s in" name name)
          normal_types
       |> String.concat "\n")
-      (names |> String.concat ", ")
+      (List.fold_right ~f:(sprintf "(%s, %s)")
+         (List.filteri ~f:(fun i _ -> i != List.length names - 1) names)
+         ~init:(List.length names - 1 |> List.nth names))
       unpack_conns_code_with_rows
   in
 
@@ -676,7 +679,9 @@ let codegen_db_str_by_sig modname types loc =
          ~f:(fun (name, _) -> sprintf "let %s = M.%s in" name name)
          normal_types
       |> String.concat "\n")
-      (names |> String.concat ", ")
+      (List.fold_right ~f:(sprintf "(%s, %s)")
+         (List.filteri ~f:(fun i _ -> i != List.length names - 1) names)
+         ~init:(List.length names - 1 |> List.nth names))
   in
 
   let delete_str_code =
@@ -813,9 +818,8 @@ let codegen_db_str_by_sig modname types loc =
              t name name)
          uuid_types
       |> String.concat "\n")
-      (sprintf "%s, %s"
-         (names |> List.tl |> String.concat ", ")
-         (names |> List.hd))
+      (List.fold_right ~f:(sprintf "(%s, %s)") (List.tl names)
+         ~init:(List.hd names))
       (unpack_conn_code "rows = Mrm.Db.Zero")
       unpack_conns_code_with_rows
   in
