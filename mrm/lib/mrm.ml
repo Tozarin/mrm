@@ -1,3 +1,7 @@
+(** Copyright 2023-2024, Starcev Matvey *)
+
+(** SPDX-License-Identifier: LGPL-3.0-or-later *)
+
 open Result
 
 let return x = Ok x
@@ -7,7 +11,7 @@ let ( let* ) = bind
 let ( >>| ) x f = match x with Ok x -> f x |> return | Error err -> error err
 
 module Db = struct
-  type mode = [ `RO | `RW | `DROP ]
+  type mode = [ `RO | `RW | `DROP | `NOTINITED ]
   type 'db rows = Zero | One of 'db | Many of 'db list
 
   let to_rows = function [] -> Zero | [ e ] -> One e | es -> Many es
