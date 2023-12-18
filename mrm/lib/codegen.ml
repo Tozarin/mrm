@@ -82,6 +82,10 @@ module Codegen_q = struct
     let types = convert_uuid types in
     let ts = List.map ~f:snd types in
     let open Printf in
+    let get_new_uuid_sig_code =
+      {| val get_new_uuid : (unit, int, [ `One ]) Caqti_request.t |}
+    in
+
     let init_sig_code =
       {| val init : (unit, unit, [ `Zero ]) Caqti_request.t |}
     in
@@ -121,6 +125,7 @@ module Codegen_q = struct
       Pmty_signature
         (interface
            [
+             get_new_uuid_sig_code;
              init_sig_code;
              drop_sig_code;
              add_sig_code;
@@ -145,6 +150,16 @@ module Codegen_q = struct
     let names = List.map ~f:fst types in
     let ts = List.map ~f:snd types in
     let open Printf in
+    let get_new_uuid_str_code =
+      sprintf
+        {|let get_new_uuid = 
+            let open Caqti_type.Std in
+            let open Caqti_request.Infix in
+            (unit ->! int)
+            "SELECT RANDOM()"
+        |}
+    in
+
     let init_str_code =
       sprintf
         {|let init = 
@@ -245,10 +260,12 @@ module Codegen_q = struct
         |> List.map ~f:(fun (name, _) -> sprintf "%s = ?" name)
         |> String.concat ", ")
     in
+
     let modstr =
       Pmod_structure
         (impl
            [
+             get_new_uuid_str_code;
              init_str_code;
              drop_str_code;
              add_str_code;
@@ -274,6 +291,7 @@ let codegen_db_sig_by_sig modname types loc =
     [ "'mainmodes" ] :: List.map ~f:(fun (_, t) -> submodes t) uuid_types
     |> List.flatten
   in
+  let not_converted_types = types in
   let types = convert_uuid types in
   let ts = List.map ~f:snd types in
   let lowname = String.lowercase_ascii modname in
@@ -347,6 +365,30 @@ let codegen_db_sig_by_sig modname types loc =
 
   let connect_not_inited_sig_code =
     connect_sig_code "connect_not_inited" "[ `NOTINITED ]"
+  in
+
+  let get_new_uuid_sig_code =
+    sprintf
+      {|val get_new_uuid :
+        %s -> ((int * %s), 'err) Result.t
+    |}
+      (conns_with_mod_sig_code "[< `RW | `RO ]")
+      (conns_with_mod_sig_code "[< `RW | `RO ]")
+  in
+
+  let new_obj_sig_code =
+    sprintf
+      {|val new_%s :
+        %s -> %s -> (((module %s) * %s), 'err) Result.t
+    |}
+      lowname
+      (List.tl not_converted_types
+      |> List.map ~f:(fun (_, t) ->
+             if List.mem t ~set:common_types then t else sprintf "(module %s)" t)
+      |> String.concat "-> ")
+      (conns_with_mod_sig_code "[< `RW | `RO ]")
+      modname
+      (conns_with_mod_sig_code "[< `RW | `RO ]")
   in
 
   let init_sig_code =
@@ -424,11 +466,19 @@ let codegen_db_sig_by_sig modname types loc =
              (module %s) list ->
              %s ->
              (%s, 'err) Result.t
-         |}
+      |}
       modname
       (conns_with_single_mod_sig_code "[ `RW ]")
       (conns_with_single_mod_sig_code "[< `RW | `RO ]")
   in
+
+  let migrate_sig_code =
+    sprintf "val migrate : %s -> %s -> (%s, 'err) Result.t"
+      (conns_with_single_mod_sig_code "[< `RW | `RO ]")
+      (conns_with_single_mod_sig_code "[ `RW ]")
+      (conns_with_single_mod_sig_code "[< `RW | `RO ]")
+  in
+
   let modsig =
     Pmty_signature
       (interface
@@ -438,6 +488,8 @@ let codegen_db_sig_by_sig modname types loc =
            [
              connect_inited_sig_code;
              connect_not_inited_sig_code;
+             get_new_uuid_sig_code;
+             new_obj_sig_code;
              init_sig_code;
              drop_sig_code;
              add_deep_sig_code;
@@ -446,6 +498,7 @@ let codegen_db_sig_by_sig modname types loc =
              select_by_uuid_sig_code;
              select_all_sig_code;
              commit_sig_code;
+             migrate_sig_code;
            ]
       |> List.flatten)
   in
@@ -464,6 +517,7 @@ let codegen_db_str_by_sig modname types loc =
     [ "'mainmodes" ] :: List.map ~f:(fun (_, t) -> submodes t) uuid_types
     |> List.flatten
   in
+  let not_converted_types = types in
   let types = convert_uuid types in
   let normal_types =
     List.filter
@@ -586,6 +640,54 @@ let codegen_db_str_by_sig modname types loc =
 
   let connect_not_inited_str_code =
     connect_str_code "connect_not_inited" "[ `NOTINITED ]"
+  in
+
+  let get_new_uuid_str_code =
+    let sigg =
+      sprintf "%s -> ((int * %s), 'err) Result.t"
+        (conns_with_mod_sig_code "[< `RW | `RO ]")
+        (conns_with_mod_sig_code "[< `RW | `RO ]")
+    in
+    sprintf
+      {|let get_new_uuid : %s = 
+         fun con ->
+          let open Mrm.Db.Connection in
+          let (%s) = con in
+          Conn.find Q.get_new_uuid () |> function
+            | Error err -> Error err
+            | Ok uuid -> Ok (uuid, (%s))
+      |}
+      sigg unpack_conns_code_with_rows unpack_conns_code_with_rows
+  in
+
+  let new_obj_str_code =
+    let sigg =
+      sprintf "%s -> %s -> (((module %s) * %s), 'err) Result.t"
+        (List.tl not_converted_types
+        |> List.map ~f:(fun (_, t) ->
+               if List.mem t ~set:common_types then t
+               else sprintf "(module %s)" t)
+        |> String.concat "-> ")
+        (conns_with_mod_sig_code "[< `RW | `RO ]")
+        modname
+        (conns_with_mod_sig_code "[< `RW | `RO ]")
+    in
+    sprintf
+      {|let new_%s : %s = 
+         fun %s con ->
+          let* (uuid, con) = get_new_uuid con in
+          let new_obj = 
+            (module struct
+              %s
+            end : %s) 
+          in
+          Ok (new_obj, con)
+      |}
+      lowname sigg
+      (List.tl names |> String.concat " ")
+      (List.map ~f:(fun name -> sprintf "let %s = %s" name name) names
+      |> String.concat "\n")
+      modname
   in
 
   let init_str_code =
@@ -824,6 +926,28 @@ let codegen_db_str_by_sig modname types loc =
       unpack_conns_code_with_rows
   in
 
+  let migrate_str_code =
+    let sigg =
+      sprintf "%s -> %s -> (%s, 'err) Result.t"
+        (conns_with_single_mod_sig_code "[< `RW | `RO ]")
+        (conns_with_single_mod_sig_code "[ `RW ]")
+        (conns_with_single_mod_sig_code "[< `RW | `RO ]")
+    in
+    sprintf
+      {|let migrate : %s = 
+         fun con_from con_to ->
+          let* (es, _) = select_all con_from in 
+          List.fold_left
+            (fun con e ->
+              let* con = con in
+              add_deep e con
+              )
+            (Mrm.return con_to)
+            es
+      |}
+      sigg
+  in
+
   let modstr =
     Pmod_structure
       (impl
@@ -839,6 +963,8 @@ let codegen_db_str_by_sig modname types loc =
              match_res_str_code;
              connect_inited_str_code;
              connect_not_inited_str_code;
+             get_new_uuid_str_code;
+             new_obj_str_code;
              init_str_code;
              drop_str_code;
              add_deep_str_code;
@@ -847,6 +973,7 @@ let codegen_db_str_by_sig modname types loc =
              select_by_uuid_str_code;
              select_all_str_code;
              commit_str_code;
+             migrate_str_code;
            ]
       |> List.flatten)
   in
