@@ -1,2 +1,29 @@
-(test
- (name mrm))
+(executable
+ (name test_main)
+ (modules test_main)
+ (public_name test_main)
+ (libraries mrm)
+ (flags -w -32)
+ (preprocess
+  (pps mrm)))
+
+(executable
+ (name test_chain)
+ (modules test_chain)
+ (public_name test_chain)
+ (libraries mrm)
+ (flags -w -32)
+ (preprocess
+  (pps mrm)))
+
+(executable
+ (name test_migrate)
+ (modules test_migrate)
+ (public_name test_migrate)
+ (libraries mrm)
+ (flags -w -32)
+ (preprocess
+  (pps mrm)))
+
+(cram
+ (deps ./test_main.exe ./test_chain.exe ./test_migrate.exe))

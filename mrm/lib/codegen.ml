@@ -370,8 +370,8 @@ let codegen_db_sig_by_sig modname types loc =
   let get_new_uuid_sig_code =
     sprintf
       {|val get_new_uuid :
-        %s -> ((int * %s), 'err) Result.t
-    |}
+          %s -> ((int * %s), 'err) Result.t
+      |}
       (conns_with_mod_sig_code "[< `RW | `RO ]")
       (conns_with_mod_sig_code "[< `RW | `RO ]")
   in
@@ -379,8 +379,8 @@ let codegen_db_sig_by_sig modname types loc =
   let new_obj_sig_code =
     sprintf
       {|val new_%s :
-        %s -> %s -> (((module %s) * %s), 'err) Result.t
-    |}
+          %s -> %s -> (((module %s) * %s), 'err) Result.t
+      |}
       lowname
       (List.tl not_converted_types
       |> List.map ~f:(fun (_, t) ->

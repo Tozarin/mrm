@@ -6,4 +6,6 @@
   caqti
   caqti-driver-postgresql
   caqti-driver-sqlite3
-  caqti.blocking))
+  caqti.blocking)
+ (instrumentation
+  (backend bisect_ppx)))

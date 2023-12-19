@@ -6,8 +6,12 @@ open Result
 
 let return x = Ok x
 let error err = Error err
-let ( >>= ) = bind
-let ( let* ) = bind
+
+let ( >>= ) :
+    ('a, 'err) Result.t -> ('a -> ('b, 'err) Result.t) -> ('b, 'err) Result.t =
+ fun m f -> match m with Error err -> Error err | Ok m -> f m
+
+let ( let* ) = ( >>= )
 let ( >>| ) x f = match x with Ok x -> f x |> return | Error err -> error err
 
 module Db = struct
