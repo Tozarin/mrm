@@ -1,0 +1,42 @@
+name: Main workflow
+
+on:
+  pull_request:
+  push:
+
+permissions: read-all
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+        ocaml-compiler:
+          - "4.14"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout tree
+        uses: actions/checkout@v3
+
+      - name: Set-up OCaml ${{ matrix.ocaml-compiler }}
+        uses: ocaml/setup-ocaml@v2
+        with:
+          ocaml-compiler: ${{ matrix.ocaml-compiler }}
+
+      - run: cd mrm
+
+      - run: opam install --deps-only --with-test .
+
+      - run: opam exec -- dune build
+
+      - run: opam exec -- dune fmt
+
+      - run: opam exec -- dune runtest --instrument-with bisect_ppx --force
+
+      - run: opam exec -- bisect-ppx-report send-to Coveralls
+        env:
+          COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
