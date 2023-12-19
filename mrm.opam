@@ -18,6 +18,7 @@ depends: [
   "caqti-driver-postgresql"
   "caqti-driver-sqlite3"
   "odoc" {with-doc}
+  "ocamlformat" {build}
 ]
 build: [
   ["dune" "subst"] {dev}

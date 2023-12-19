@@ -26,6 +26,7 @@
   bisect_ppx
   caqti
   caqti-driver-postgresql
-  caqti-driver-sqlite3)
+  caqti-driver-sqlite3
+  (ocamlformat :build))
  (tags
   ("ORM" "MRM")))
