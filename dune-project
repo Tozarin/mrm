@@ -20,6 +20,12 @@
  (synopsis "Module relational mapper")
  (description
   "ORM-like library to OCaml that used first-class modules insted objects")
- (depends ocaml dune)
+ (depends
+  ocaml
+  dune
+  bisect_ppx
+  caqti
+  caqti-driver-postgresql
+  caqti-driver-sqlite3)
  (tags
   ("ORM" "MRM")))

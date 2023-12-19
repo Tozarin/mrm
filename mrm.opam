@@ -13,6 +13,10 @@ bug-reports: "https://github.com/Tozarin/mrm/issues"
 depends: [
   "ocaml"
   "dune" {>= "3.10"}
+  "bisect_ppx"
+  "caqti"
+  "caqti-driver-postgresql"
+  "caqti-driver-sqlite3"
   "odoc" {with-doc}
 ]
 build: [
