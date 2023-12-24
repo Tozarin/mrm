@@ -33,7 +33,7 @@ jobs:
 
       - run: opam exec -- dune fmt
 
-      - run: opam exec -- BISECT_FILE=`pwd`/bisect dune runtest --force --instrument-with bisect_ppx
+      - run: BISECT_FILE=`pwd`/bisect opam exec -- dune runtest --force --instrument-with bisect_ppx
 
       - run: opam exec -- bisect-ppx-report send-to Coveralls
         env:
